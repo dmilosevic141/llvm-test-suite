@@ -12,6 +12,7 @@ import os.path
 import re
 import numbers
 import argparse
+import math
 
 GEOMEAN_ROW = 'Geomean difference'
 
@@ -214,6 +215,12 @@ def format_relative_diff(value):
     else:
         return "%-5d" % value
 
+def strip_name_fully(name):
+    name = name.split('/')[-1]
+    if name.endswith('.test'):
+        name = name[:-5]
+    return name
+
 def print_result(d, limit_output=True, shorten_names=True, minimal_names=False,
                  show_diff_column=True, sortkey='diff', sort_by_abs=True,
                  absolute_diff=False):
@@ -248,13 +255,6 @@ def print_result(d, limit_output=True, shorten_names=True, minimal_names=False,
                 name = name[:-common_suffix]
             return "%-45s" % truncate(name, 10, 30)
 
-
-        def strip_name_fully(name):
-            name = name.split('/')[-1]
-            if name.endswith('.test'):
-                name = name[:-5]
-            return name
-
         # The to_string formatters argument appears to be ignored for
         # dtype=object, so transform the program column manually.
         if minimal_names:
@@ -281,6 +281,160 @@ def print_result(d, limit_output=True, shorten_names=True, minimal_names=False,
                             float_format=float_format, formatters=formatters)
     print(out)
     print(d.describe())
+
+def strip_extension_from_file_name(file_name):
+    # drop .json/.csv suffix; TODO: Should we rather do this in the printing
+    # logic?
+    head, tail = os.path.split(file_name)
+    for ext in ['.csv', '.json']:
+        if tail.endswith(ext):
+            tail = tail[:-len(ext)]
+    return tail
+
+def draw_plots(data, files, output_path, metrics):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        sys.stderr.write('matplotlib.pyplot not found.')
+        sys.exit(1)
+    try:
+        from matplotlib.cm import get_cmap
+    except ImportError:
+        sys.stderr.write('get_cmap from matplotlib.cm not found.')
+        sys.exit(1)
+
+    # Prepare the mean values
+    d = data.mean()
+
+    file_name_a = strip_extension_from_file_name(files[0])
+    file_name_b = strip_extension_from_file_name(files[1])
+
+    mean_idx, test_idx = 0, 1
+    fig, axs = plt.subplots(2, len(metrics), squeeze=False)
+    fig.suptitle(
+        'Mean values and top 10 most differing test results for the given metric(s)\n{} vs. {}'.format(file_name_a, file_name_b),
+        fontsize=5,
+        fontweight='bold',
+        color='black'
+    )
+
+    cmap = get_cmap("tab10")
+    colors = cmap.colors
+
+    for i in range(len(metrics)):
+        bars = []
+        axs[mean_idx][i].set_title(
+            'Metric: {}'.format(metrics[i]),
+            fontsize=5,
+            fontweight='bold',
+            color='black'
+        )
+        axs[mean_idx][i].set_xticks([])
+        axs[mean_idx][i].set_xticklabels([])
+        axs[mean_idx][i].spines['top'].set_visible(False)
+        axs[mean_idx][i].spines['right'].set_visible(False)
+        for j in range(len(files)):
+            file_name = strip_extension_from_file_name(files[j])
+            bar = axs[mean_idx][i].bar(
+                j * 5,
+                d[(metrics[i], file_name)],
+                width=0.5,
+                color=colors[j]
+            )
+            bars.append(bar)
+            axs[mean_idx][i].text(
+                j * 5,
+                d[(metrics[i], file_name)] * 1.025,
+                s=str(round(d[(metrics[i], file_name)], 3)),
+                color=colors[j],
+                fontstyle='italic',
+                fontweight='bold',
+                fontsize=10,
+                horizontalalignment='center'
+            )
+        axs[mean_idx][i].legend(bars, [strip_extension_from_file_name(file) for file in files], prop={'size': 5}, loc='lower center')
+
+    # Prepare test results
+    for i in range(len(metrics)):
+        test_result_diffs = {}
+        data_key_a = (metrics[i], file_name_a)
+        data_key_b = (metrics[i], file_name_b)
+        for test_name in data[data_key_a].keys():
+            if test_name not in data[data_key_b].keys():
+                continue
+            value_a = data[data_key_a][test_name]
+            value_b = data[data_key_b][test_name]
+            if value_a == 0 or value_b == 0:
+                continue
+            test_result_diff = max(value_a, value_b) / min(value_a, value_b) - 1.0
+            if (value_b > value_a):
+                test_result_diff *= -1
+            if math.isnan(test_result_diff) or math.isinf(test_result_diff):
+                continue
+            test_result_diffs[test_name] = test_result_diff
+        sorted_test_result_diffs = dict(sorted(test_result_diffs.items(), key=lambda item: abs(item[1]), reverse=True))
+        size = min(len(sorted_test_result_diffs), 10)
+        top_test_result_diffs = list(sorted_test_result_diffs.items())[:size]
+        fontdict = {
+            'fontsize': 5,
+            'fontstyle': 'italic',
+            'fontweight': 'bold',
+            'horizontalalignment': 'center'
+        }
+        axs[test_idx][i].set_title(
+            'Metric: {}'.format(metrics[i]),
+            fontsize=5,
+            fontweight='bold',
+            color='black'
+        )
+        axs[test_idx][i].set_xlabel('Test name', fontdict=fontdict)
+        axs[test_idx][i].set_ylabel('Increase/Decrease (in %)', fontdict=fontdict)
+        axs[test_idx][i].set_xticks([0.5 + x for x in range(0, size)])
+        test_names = [strip_name_fully(test_result_info[0]) for test_result_info in top_test_result_diffs]
+        fontdict['fontsize'] = 3.775
+        axs[test_idx][i].set_xticklabels(test_names, fontdict=fontdict, rotation=45)
+        axs[test_idx][i].spines['top'].set_visible(False)
+        axs[test_idx][i].spines['right'].set_visible(False)
+        test_results = [test_result_info[1] for test_result_info in top_test_result_diffs]
+        axs[test_idx][i].bar(
+            list(range(0, 10)),
+            height=test_results,
+            edgecolor='black',
+            linewidth=0.25,
+            color='green',
+            width=1,
+            align='edge'
+        )
+        for rect, label in zip(axs[test_idx][i].patches, ["{}{}%".format("+" if test_result > 0 else "", round(test_result * 100, 2)) for test_result in test_results]):
+            height = rect.get_height()
+            axs[test_idx][i].text(
+                rect.get_x() + rect.get_width() / 2,
+                height * 1.025,
+                label,
+                fontstyle='italic',
+                fontweight='bold',
+                fontsize=5,
+                horizontalalignment='center',
+                verticalalignment=('bottom' if (height > 0) else 'top')
+            )
+
+    plt.tight_layout()
+
+    if output_path == '-':
+        plt.savefig('plot.png', dpi=500)
+        print('The plot was saved at: plot.png.')
+    else:
+        plt.savefig(
+            os.path.normpath(
+                os.path.join(output_path, 'plot.png')
+            ),
+            dpi=500
+        )
+        print('The plot was saved at: {}.'.format(
+            os.path.normpath(
+                os.path.join(output_path, 'plot.png')
+            )
+        ))
 
 def main():
     parser = argparse.ArgumentParser(prog='compare.py')
@@ -317,7 +471,16 @@ def main():
                         dest='minimal_names', default=False)
     parser.add_argument('--no-abs-sort', action='store_true',
                         dest='no_abs_sort', default=False, help="Don't use abs() when sorting results")
+    parser.add_argument('-plot', action='store_true', dest='plot', default=False)
+    parser.add_argument('--plot-path', type=str, action='store', dest='plot_path', metavar='[=<path>]', default='-')
     config = parser.parse_args()
+
+    if (config.plot_path != '-' and not config.plot):
+        sys.stderr.write('Please specify --plot-path only with the -plot option.\n')
+        sys.exit(1)
+    if (config.plot_path != '-' and not os.path.isdir(config.plot_path)):
+        sys.stderr.write('Provided --plot-path is not a valid directory!\n')
+        sys.exit(1)
 
     if config.show_diff is None:
         config.show_diff = len(config.files) > 1
@@ -414,6 +577,9 @@ def main():
                  config.show_diff, sortkey, config.no_abs_sort,
                  config.absolute_diff)
 
+
+    if (config.plot):
+        draw_plots(data, files, config.plot_path, metrics)
 
 if __name__ == "__main__":
     main()
